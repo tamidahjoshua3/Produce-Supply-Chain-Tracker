@@ -5,6 +5,7 @@
 (define-constant err-batch-exists (err u101))
 (define-constant err-batch-not-found (err u102))
 (define-constant err-invalid-status (err u103))
+(define-constant err-batch-recalled (err u104))
 
 (define-map BatchDetails
     { batch-id: uint }
@@ -445,4 +446,165 @@
         )))
         (ok (get current-holder batch-data))
     )
+)
+
+(define-map BatchRecalls
+    {
+        batch-id: uint,
+        recall-id: uint,
+    }
+    {
+        initiator: principal,
+        reason: (string-ascii 200),
+        severity: (string-ascii 20),
+        initiated-at: uint,
+        is-active: bool,
+        affected-parties: (list 10 principal),
+    }
+)
+
+(define-map RecallNotifications
+    { 
+        batch-id: uint,
+        notified-party: principal,
+    }
+    {
+        recall-id: uint,
+        notified-at: uint,
+        acknowledgement: bool,
+    }
+)
+
+(define-data-var last-recall-id uint u0)
+
+(define-public (initiate-recall
+        (batch-id uint)
+        (reason (string-ascii 200))
+        (severity (string-ascii 20))
+        (affected-parties (list 10 principal))
+    )
+    (let (
+            (recall-id (+ (var-get last-recall-id) u1))
+            (batch-data (unwrap! (map-get? BatchDetails { batch-id: batch-id })
+                err-batch-not-found
+            ))
+        )
+        (asserts! 
+            (or 
+                (is-eq tx-sender contract-owner)
+                (is-eq tx-sender (get producer batch-data))
+                (is-eq tx-sender (get current-holder batch-data))
+            )
+            err-not-authorized
+        )
+        (map-set BatchRecalls {
+            batch-id: batch-id,
+            recall-id: recall-id,
+        } {
+            initiator: tx-sender,
+            reason: reason,
+            severity: severity,
+            initiated-at: stacks-block-height,
+            is-active: true,
+            affected-parties: affected-parties,
+        })
+        (map-set BatchDetails { batch-id: batch-id } {
+            producer: (get producer batch-data),
+            harvest-date: (get harvest-date batch-data),
+            harvest-location: (get harvest-location batch-data),
+            produce-type: (get produce-type batch-data),
+            quantity: (get quantity batch-data),
+            current-status: "recalled",
+            current-holder: (get current-holder batch-data),
+        })
+        (var-set last-recall-id recall-id)
+        (ok recall-id)
+    )
+)
+
+(define-public (acknowledge-recall
+        (batch-id uint)
+        (recall-id uint)
+    )
+    (let ((recall-data (unwrap!
+            (map-get? BatchRecalls {
+                batch-id: batch-id,
+                recall-id: recall-id,
+            })
+            err-batch-not-found
+        )))
+        (asserts! (get is-active recall-data) err-invalid-status)
+        (map-set RecallNotifications {
+            batch-id: batch-id,
+            notified-party: tx-sender,
+        } {
+            recall-id: recall-id,
+            notified-at: stacks-block-height,
+            acknowledgement: true,
+        })
+        (ok true)
+    )
+)
+
+(define-public (close-recall
+        (batch-id uint)
+        (recall-id uint)
+    )
+    (let ((recall-data (unwrap!
+            (map-get? BatchRecalls {
+                batch-id: batch-id,
+                recall-id: recall-id,
+            })
+            err-batch-not-found
+        )))
+        (asserts! 
+            (or 
+                (is-eq tx-sender contract-owner)
+                (is-eq tx-sender (get initiator recall-data))
+            )
+            err-not-authorized
+        )
+        (asserts! (get is-active recall-data) err-invalid-status)
+        (map-set BatchRecalls {
+            batch-id: batch-id,
+            recall-id: recall-id,
+        }
+            (merge recall-data { is-active: false })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-recall-details
+        (batch-id uint)
+        (recall-id uint)
+    )
+    (ok (unwrap!
+        (map-get? BatchRecalls {
+            batch-id: batch-id,
+            recall-id: recall-id,
+        })
+        err-batch-not-found
+    ))
+)
+
+(define-read-only (is-batch-recalled (batch-id uint))
+    (let ((batch-data (unwrap! (map-get? BatchDetails { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (ok (is-eq (get current-status batch-data) "recalled"))
+    )
+)
+
+(define-read-only (get-recall-notification
+        (batch-id uint)
+        (notified-party principal)
+    )
+    (ok (unwrap!
+        (map-get? RecallNotifications {
+            batch-id: batch-id,
+            notified-party: notified-party,
+        })
+        err-batch-not-found
+    ))
 )
