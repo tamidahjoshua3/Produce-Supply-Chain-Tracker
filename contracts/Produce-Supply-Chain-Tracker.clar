@@ -9,6 +9,8 @@
 (define-constant err-insufficient-quantity (err u105))
 (define-constant err-incompatible-batches (err u106))
 (define-constant err-invalid-split (err u107))
+(define-constant err-batch-expired (err u108))
+(define-constant err-expiration-exists (err u109))
 
 (define-map BatchDetails
     { batch-id: uint }
@@ -823,4 +825,163 @@
         (map-get? BatchMergeHistory { merge-id: merge-id })
         err-batch-not-found
     ))
+)
+
+(define-map ExpirationMetadata
+    { batch-id: uint }
+    {
+        expiration-block: uint,
+        shelf-life-days: uint,
+        storage-conditions: (string-ascii 50),
+        is-perishable: bool,
+        freshness-alerts: (list 5 uint),
+    }
+)
+
+(define-map FreshnessCheckpoints
+    {
+        batch-id: uint,
+        checkpoint-id: uint,
+    }
+    {
+        checked-at: uint,
+        checker: principal,
+        freshness-score: uint,
+        notes: (string-ascii 100),
+    }
+)
+
+(define-data-var last-checkpoint-id uint u0)
+
+(define-public (set-expiration
+        (batch-id uint)
+        (shelf-life-blocks uint)
+        (storage-conditions (string-ascii 50))
+        (is-perishable bool)
+    )
+    (let ((batch-data (unwrap! (map-get? BatchDetails { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (asserts! (is-eq tx-sender (get current-holder batch-data))
+            err-not-authorized
+        )
+        (asserts! (is-none (map-get? ExpirationMetadata { batch-id: batch-id }))
+            err-expiration-exists
+        )
+        (map-set ExpirationMetadata { batch-id: batch-id } {
+            expiration-block: (+ stacks-block-height shelf-life-blocks),
+            shelf-life-days: shelf-life-blocks,
+            storage-conditions: storage-conditions,
+            is-perishable: is-perishable,
+            freshness-alerts: (list),
+        })
+        (ok true)
+    )
+)
+
+(define-public (record-freshness-check
+        (batch-id uint)
+        (freshness-score uint)
+        (notes (string-ascii 100))
+    )
+    (let (
+            (checkpoint-id (+ (var-get last-checkpoint-id) u1))
+            (expiration-data (unwrap! (map-get? ExpirationMetadata { batch-id: batch-id })
+                err-batch-not-found
+            ))
+        )
+        (asserts! (<= freshness-score u100) err-invalid-status)
+        (map-set FreshnessCheckpoints {
+            batch-id: batch-id,
+            checkpoint-id: checkpoint-id,
+        } {
+            checked-at: stacks-block-height,
+            checker: tx-sender,
+            freshness-score: freshness-score,
+            notes: notes,
+        })
+        (if (and (get is-perishable expiration-data) (< freshness-score u60))
+            (let ((updated-alerts (unwrap-panic (as-max-len? (append (get freshness-alerts expiration-data) checkpoint-id) u5))))
+                (map-set ExpirationMetadata { batch-id: batch-id }
+                    (merge expiration-data { freshness-alerts: updated-alerts })
+                )
+                (var-set last-checkpoint-id checkpoint-id)
+                (ok checkpoint-id)
+            )
+            (begin
+                (var-set last-checkpoint-id checkpoint-id)
+                (ok checkpoint-id)
+            )
+        )
+    )
+)
+
+(define-public (mark-batch-expired (batch-id uint))
+    (let (
+            (batch-data (unwrap! (map-get? BatchDetails { batch-id: batch-id })
+                err-batch-not-found
+            ))
+            (expiration-data (unwrap! (map-get? ExpirationMetadata { batch-id: batch-id })
+                err-batch-not-found
+            ))
+        )
+        (asserts!
+            (or 
+                (is-eq tx-sender (get current-holder batch-data))
+                (>= stacks-block-height (get expiration-block expiration-data))
+            )
+            err-not-authorized
+        )
+        (map-set BatchDetails { batch-id: batch-id }
+            (merge batch-data { current-status: "expired" })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-expiration-metadata (batch-id uint))
+    (ok (unwrap!
+        (map-get? ExpirationMetadata { batch-id: batch-id })
+        err-batch-not-found
+    ))
+)
+
+(define-read-only (is-batch-expired (batch-id uint))
+    (let ((expiration-data (unwrap! (map-get? ExpirationMetadata { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (ok (>= stacks-block-height (get expiration-block expiration-data)))
+    )
+)
+
+(define-read-only (get-remaining-shelf-life (batch-id uint))
+    (let ((expiration-data (unwrap! (map-get? ExpirationMetadata { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (if (>= stacks-block-height (get expiration-block expiration-data))
+            (ok u0)
+            (ok (- (get expiration-block expiration-data) stacks-block-height))
+        )
+    )
+)
+
+(define-read-only (get-freshness-checkpoint
+        (batch-id uint)
+        (checkpoint-id uint)
+    )
+    (ok (unwrap!
+        (map-get? FreshnessCheckpoints {
+            batch-id: batch-id,
+            checkpoint-id: checkpoint-id,
+        })
+        err-batch-not-found
+    ))
+)
+
+(define-read-only (get-freshness-alerts (batch-id uint))
+    (let ((expiration-data (unwrap! (map-get? ExpirationMetadata { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (ok (get freshness-alerts expiration-data))
+    )
 )
