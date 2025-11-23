@@ -985,3 +985,287 @@
         (ok (get freshness-alerts expiration-data))
     )
 )
+
+(define-map BatchAnalytics
+    { batch-id: uint }
+    {
+        total-transfers: uint,
+        total-handlers: uint,
+        first-transfer-time: uint,
+        last-transfer-time: uint,
+        average-handling-time: uint,
+        quality-checks: uint,
+        average-quality-score: uint,
+        total-distance-traveled: uint,
+        certifications-count: uint,
+        recall-count: uint,
+    }
+)
+
+(define-map HandlerMetrics
+    { handler: principal }
+    {
+        batches-handled: uint,
+        total-transfers: uint,
+        average-handling-time: uint,
+        quality-issues: uint,
+        successful-deliveries: uint,
+    }
+)
+
+(define-map LocationMetrics
+    { location: (string-ascii 50) }
+    {
+        batches-processed: uint,
+        average-temperature: uint,
+        average-humidity: uint,
+        total-visits: uint,
+    }
+)
+
+(define-public (initialize-analytics (batch-id uint))
+    (let ((batch-data (unwrap! (map-get? BatchDetails { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (asserts! (is-none (map-get? BatchAnalytics { batch-id: batch-id }))
+            err-batch-exists
+        )
+        (map-set BatchAnalytics { batch-id: batch-id } {
+            total-transfers: u0,
+            total-handlers: u1,
+            first-transfer-time: u0,
+            last-transfer-time: u0,
+            average-handling-time: u0,
+            quality-checks: u0,
+            average-quality-score: u100,
+            total-distance-traveled: u0,
+            certifications-count: u0,
+            recall-count: u0,
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-transfer-analytics
+        (batch-id uint)
+        (handling-time uint)
+    )
+    (let (
+            (analytics (unwrap! (map-get? BatchAnalytics { batch-id: batch-id })
+                err-batch-not-found
+            ))
+            (new-total-transfers (+ (get total-transfers analytics) u1))
+            (current-time stacks-block-height)
+            (new-avg-handling-time (/ (+ (* (get average-handling-time analytics) (get total-transfers analytics)) handling-time) new-total-transfers))
+        )
+        (map-set BatchAnalytics { batch-id: batch-id }
+            (merge analytics {
+                total-transfers: new-total-transfers,
+                last-transfer-time: current-time,
+                average-handling-time: new-avg-handling-time,
+                first-transfer-time: (if (is-eq (get first-transfer-time analytics) u0) current-time (get first-transfer-time analytics)),
+            })
+        )
+        (update-handler-metrics tx-sender handling-time)
+    )
+)
+
+(define-public (update-quality-analytics
+        (batch-id uint)
+        (quality-score uint)
+    )
+    (let (
+            (analytics (unwrap! (map-get? BatchAnalytics { batch-id: batch-id })
+                err-batch-not-found
+            ))
+            (new-quality-checks (+ (get quality-checks analytics) u1))
+            (new-avg-quality (/ (+ (* (get average-quality-score analytics) (get quality-checks analytics)) quality-score) new-quality-checks))
+        )
+        (asserts! (<= quality-score u100) err-invalid-status)
+        (map-set BatchAnalytics { batch-id: batch-id }
+            (merge analytics {
+                quality-checks: new-quality-checks,
+                average-quality-score: new-avg-quality,
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (increment-certification-count (batch-id uint))
+    (let ((analytics (unwrap! (map-get? BatchAnalytics { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (map-set BatchAnalytics { batch-id: batch-id }
+            (merge analytics {
+                certifications-count: (+ (get certifications-count analytics) u1),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (increment-recall-count (batch-id uint))
+    (let ((analytics (unwrap! (map-get? BatchAnalytics { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (map-set BatchAnalytics { batch-id: batch-id }
+            (merge analytics {
+                recall-count: (+ (get recall-count analytics) u1),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-private (update-handler-metrics
+        (handler principal)
+        (handling-time uint)
+    )
+    (let ((metrics-opt (map-get? HandlerMetrics { handler: handler })))
+        (match metrics-opt
+            existing-metrics
+                (let (
+                        (new-total-transfers (+ (get total-transfers existing-metrics) u1))
+                        (new-avg-handling (/ (+ (* (get average-handling-time existing-metrics) (get total-transfers existing-metrics)) handling-time) new-total-transfers))
+                    )
+                    (map-set HandlerMetrics { handler: handler }
+                        (merge existing-metrics {
+                            total-transfers: new-total-transfers,
+                            average-handling-time: new-avg-handling,
+                        })
+                    )
+                    (ok true)
+                )
+            (begin
+                (map-set HandlerMetrics { handler: handler } {
+                    batches-handled: u1,
+                    total-transfers: u1,
+                    average-handling-time: handling-time,
+                    quality-issues: u0,
+                    successful-deliveries: u0,
+                })
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-public (update-location-metrics
+        (location (string-ascii 50))
+        (temperature uint)
+        (humidity uint)
+    )
+    (let ((metrics-opt (map-get? LocationMetrics { location: location })))
+        (match metrics-opt
+            existing-metrics
+                (let (
+                        (new-total-visits (+ (get total-visits existing-metrics) u1))
+                        (new-avg-temp (/ (+ (* (get average-temperature existing-metrics) (get total-visits existing-metrics)) temperature) new-total-visits))
+                        (new-avg-humidity (/ (+ (* (get average-humidity existing-metrics) (get total-visits existing-metrics)) humidity) new-total-visits))
+                    )
+                    (map-set LocationMetrics { location: location } {
+                        batches-processed: (get batches-processed existing-metrics),
+                        average-temperature: new-avg-temp,
+                        average-humidity: new-avg-humidity,
+                        total-visits: new-total-visits,
+                    })
+                    (ok true)
+                )
+            (begin
+                (map-set LocationMetrics { location: location } {
+                    batches-processed: u1,
+                    average-temperature: temperature,
+                    average-humidity: humidity,
+                    total-visits: u1,
+                })
+                (ok true)
+            )
+        )
+    )
+)
+
+(define-public (increment-handler-deliveries (handler principal))
+    (let ((metrics (unwrap! (map-get? HandlerMetrics { handler: handler })
+            err-batch-not-found
+        )))
+        (map-set HandlerMetrics { handler: handler }
+            (merge metrics {
+                successful-deliveries: (+ (get successful-deliveries metrics) u1),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-public (record-quality-issue (handler principal))
+    (let ((metrics (unwrap! (map-get? HandlerMetrics { handler: handler })
+            err-batch-not-found
+        )))
+        (map-set HandlerMetrics { handler: handler }
+            (merge metrics {
+                quality-issues: (+ (get quality-issues metrics) u1),
+            })
+        )
+        (ok true)
+    )
+)
+
+(define-read-only (get-batch-analytics (batch-id uint))
+    (ok (unwrap!
+        (map-get? BatchAnalytics { batch-id: batch-id })
+        err-batch-not-found
+    ))
+)
+
+(define-read-only (get-handler-metrics (handler principal))
+    (ok (unwrap!
+        (map-get? HandlerMetrics { handler: handler })
+        err-batch-not-found
+    ))
+)
+
+(define-read-only (get-location-metrics (location (string-ascii 50)))
+    (ok (unwrap!
+        (map-get? LocationMetrics { location: location })
+        err-batch-not-found
+    ))
+)
+
+(define-read-only (get-batch-efficiency-score (batch-id uint))
+    (let ((analytics (unwrap! (map-get? BatchAnalytics { batch-id: batch-id })
+            err-batch-not-found
+        )))
+        (let (
+                (quality-weight (* (get average-quality-score analytics) u4))
+                (transfer-penalty (* (get total-transfers analytics) u2))
+                (recall-penalty (* (get recall-count analytics) u50))
+                (raw-score (if (> (+ quality-weight u100) (+ transfer-penalty recall-penalty))
+                    (- (+ quality-weight u100) (+ transfer-penalty recall-penalty))
+                    u0
+                ))
+            )
+            (ok (if (> raw-score u100) u100 raw-score))
+        )
+    )
+)
+
+(define-read-only (get-handler-reliability-score (handler principal))
+    (let ((metrics (unwrap! (map-get? HandlerMetrics { handler: handler })
+            err-batch-not-found
+        )))
+        (let (
+                (success-rate (if (> (get total-transfers metrics) u0)
+                    (/ (* (get successful-deliveries metrics) u100) (get total-transfers metrics))
+                    u0
+                ))
+                (issue-penalty (* (get quality-issues metrics) u5))
+                (reliability (if (> success-rate issue-penalty)
+                    (- success-rate issue-penalty)
+                    u0
+                ))
+            )
+            (ok (if (> reliability u100) u100 reliability))
+        )
+    )
+)
